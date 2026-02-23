@@ -1,0 +1,7 @@
+{
+  "name": "Kaptan APP",
+  "description": "Real-time fleet monitoring, trip tracking, and billing management.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

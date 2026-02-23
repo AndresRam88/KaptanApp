@@ -1,0 +1,11 @@
+[build]
+  builder = "nixpacks"
+
+[phases.setup]
+  nixPkgs = ["nodejs", "python3", "pkg-config", "build-essential"]
+
+[phases.build]
+  cmds = ["npm install", "npm run build"]
+
+[start]
+  cmd = "npm start"
