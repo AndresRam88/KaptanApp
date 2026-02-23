@@ -259,11 +259,11 @@ export default function App() {
               Sign In
             </button>
             <div className="mt-8 pt-6 border-t border-black/5 text-center">
-              <p className="text-[11px] font-bold text-black/60 mb-2">¿Quieres usarlo como una App?</p>
+              <p className="text-[11px] font-bold text-black/60 mb-2">Want to use it as an App?</p>
               <p className="text-[10px] text-black/40 leading-relaxed">
-                En Android: Dale a los tres puntos <span className="font-bold">⋮</span> y elige <span className="font-bold">"Instalar aplicación"</span>.
+                On Android: Tap the three dots <span className="font-bold">⋮</span> and choose <span className="font-bold">"Install app"</span>.
                 <br/>
-                En iPhone: Dale al botón <span className="font-bold">Compartir</span> y elige <span className="font-bold">"Añadir a pantalla de inicio"</span>.
+                On iPhone: Tap the <span className="font-bold">Share</span> button and choose <span className="font-bold">"Add to Home Screen"</span>.
               </p>
             </div>
           </form>
