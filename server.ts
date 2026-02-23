@@ -81,7 +81,7 @@ if (carCount.count === 0) {
   const insertCar = db.prepare("INSERT INTO cars (id, name, lat, lng, status) VALUES (?, ?, ?, ?, ?)");
   for (let i = 0; i < initialNames.length; i++) {
     const carId = `car-${i + 1}`;
-    insertCar.run(carId, initialNames[i], 19.4326 + (Math.random() - 0.5) * 0.01, -99.1332 + (Math.random() - 0.5) * 0.01, 'idle');
+    insertCar.run(carId, initialNames[i], 25.2048 + (Math.random() - 0.5) * 0.05, 55.2708 + (Math.random() - 0.5) * 0.05, 'idle');
   }
 }
 
@@ -204,8 +204,8 @@ async function startServer() {
     const origin = "Current Location";
     
     // Generate a random target location near the city center for simulation
-    const target_lat = 19.4326 + (Math.random() - 0.5) * 0.05;
-    const target_lng = -99.1332 + (Math.random() - 0.5) * 0.05;
+    const target_lat = 25.2048 + (Math.random() - 0.5) * 0.05;
+    const target_lng = 55.2708 + (Math.random() - 0.5) * 0.05;
 
     const info = db.prepare("INSERT INTO trips (car_id, origin, destination, price) VALUES (?, ?, ?, ?)").run(car_id, origin, destination, price);
     db.prepare("UPDATE cars SET status = 'busy', target_lat = ?, target_lng = ? WHERE id = ?").run(target_lat, target_lng, car_id);

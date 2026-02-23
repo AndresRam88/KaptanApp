@@ -18,8 +18,43 @@ import {
 } from 'lucide-react';
 import { generateLogo } from './services/logoService';
 import { motion, AnimatePresence } from 'motion/react';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import L from 'leaflet';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+
+// Fix Leaflet icon issue
+import 'leaflet/dist/leaflet.css';
+const DefaultIcon = L.icon({
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+});
+L.Marker.prototype.options.icon = DefaultIcon;
+
+// Custom Car Icon
+const carIcon = (status: string, isUser: boolean) => L.divIcon({
+  className: 'custom-div-icon',
+  html: `<div class="p-2 rounded-full shadow-lg transition-all ${status === 'idle' ? 'bg-emerald-500' : 'bg-amber-500'} ${isUser ? 'ring-4 ring-black ring-offset-2' : ''}">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></svg>
+  </div>`,
+  iconSize: [32, 32],
+  iconAnchor: [16, 16],
+});
+
+function MapFocus({ carId, cars }: { carId: string | null, cars: Car[] }) {
+  const map = useMap();
+  useEffect(() => {
+    if (carId) {
+      const car = cars.find(c => c.id === carId);
+      if (car) {
+        map.setView([car.lat, car.lng], 15, { animate: true });
+      }
+    }
+  }, [carId, cars, map]);
+  return null;
+}
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -411,14 +446,8 @@ export default function App() {
 
         {/* Right Column: Map & History */}
         <div className="lg:col-span-8 space-y-6">
-          {/* Mock Map Visualization */}
-          <section className="bg-white rounded-2xl border border-black/5 p-6 shadow-sm relative overflow-hidden h-[400px]">
-            <div className="absolute inset-0 opacity-10 pointer-events-none">
-              <div className="w-full h-full" style={{ 
-                backgroundImage: 'radial-gradient(#000 1px, transparent 1px)', 
-                backgroundSize: '20px 20px' 
-              }} />
-            </div>
+          {/* Real Map Visualization */}
+          <section className="bg-white rounded-2xl border border-black/5 p-6 shadow-sm relative overflow-hidden h-[450px]">
             <div className="relative z-10 h-full flex flex-col">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="font-bold flex items-center gap-2">
@@ -435,59 +464,33 @@ export default function App() {
                 </div>
               </div>
               
-              <div className="flex-1 bg-black/[0.02] rounded-xl border border-black/5 relative overflow-hidden">
-                {cars.map(car => (
-                  <React.Fragment key={car.id}>
-                    {/* Route Line if busy */}
-                    {car.status === 'busy' && car.target_lat && car.target_lng && (
-                      <svg className="absolute inset-0 w-full h-full pointer-events-none overflow-visible">
-                        <line 
-                          x1={`${((car.lng + 99.14) * 5000) % 100}%`}
-                          y1={`${((car.lat - 19.42) * 5000) % 100}%`}
-                          x2={`${((car.target_lng + 99.14) * 5000) % 100}%`}
-                          y2={`${((car.target_lat - 19.42) * 5000) % 100}%`}
-                          stroke={car.id === user.car_id ? "rgba(16, 185, 129, 0.4)" : "rgba(245, 158, 11, 0.3)"}
-                          strokeWidth="2"
-                          strokeDasharray="4 4"
-                        />
-                        <circle 
-                          cx={`${((car.target_lng + 99.14) * 5000) % 100}%`}
-                          cy={`${((car.target_lat - 19.42) * 5000) % 100}%`}
-                          r="4"
-                          fill={car.id === user.car_id ? "rgba(16, 185, 129, 0.6)" : "rgba(245, 158, 11, 0.5)"}
-                        />
-                      </svg>
-                    )}
-                    <motion.div
-                      layoutId={car.id}
-                      className="absolute cursor-pointer"
-                      initial={false}
-                      animate={{
-                        x: `${((car.lng + 99.14) * 5000) % 100}%`,
-                        y: `${((car.lat - 19.42) * 5000) % 100}%`,
-                        scale: focusedCarId === car.id ? 1.5 : 1,
-                        zIndex: focusedCarId === car.id ? 50 : 10
-                      }}
-                      transition={{ type: 'spring', stiffness: 50, damping: 20 }}
+              <div className="flex-1 bg-black/[0.02] rounded-xl border border-black/5 relative overflow-hidden z-0">
+                <MapContainer 
+                  center={[cars[0]?.lat || 25.2048, cars[0]?.lng || 55.2708]} 
+                  zoom={13} 
+                  style={{ height: '100%', width: '100%' }}
+                >
+                  <TileLayer
+                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                  />
+                  <MapFocus carId={focusedCarId} cars={cars} />
+                  {cars.map(car => (
+                    <Marker 
+                      key={car.id} 
+                      position={[car.lat, car.lng]}
+                      icon={carIcon(car.status, car.id === user.car_id)}
                     >
-                      <div className="relative group">
-                        <div className={cn(
-                          "p-2 rounded-full shadow-lg transition-all",
-                          car.status === 'idle' ? "bg-emerald-500" : "bg-amber-500",
-                          (focusedCarId === car.id || car.id === user.car_id) && "ring-4 ring-black ring-offset-2"
-                        )}>
-                          <CarIcon size={16} className="text-white" />
+                      <Popup>
+                        <div className="p-1">
+                          <p className="font-bold text-sm">{car.name}</p>
+                          <p className="text-xs text-black/60 uppercase">{car.status}</p>
+                          {car.id === user.car_id && <p className="text-[10px] text-emerald-600 font-bold mt-1">THIS IS YOU</p>}
                         </div>
-                        <div className={cn(
-                          "absolute top-full left-1/2 -translate-x-1/2 mt-2 bg-black text-white text-[10px] px-2 py-1 rounded whitespace-nowrap transition-opacity",
-                          (focusedCarId === car.id || car.id === user.car_id) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                        )}>
-                          {car.name} {car.id === user.car_id ? '(You)' : ''}
-                        </div>
-                      </div>
-                    </motion.div>
-                  </React.Fragment>
-                ))}
+                      </Popup>
+                    </Marker>
+                  ))}
+                </MapContainer>
               </div>
             </div>
           </section>
