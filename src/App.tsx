@@ -14,7 +14,11 @@ import {
   Settings,
   Users,
   Trash2,
-  ShieldCheck
+  ShieldCheck,
+  Mic,
+  MicOff,
+  Radio,
+  Volume2
 } from 'lucide-react';
 import { generateLogo } from './services/logoService';
 import { motion, AnimatePresence } from 'motion/react';
@@ -75,17 +79,48 @@ export default function App() {
   const [focusedCarId, setFocusedCarId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [appLogo, setAppLogo] = useState<string | null>(null);
+  const [appName, setAppName] = useState('Kaptan APP');
+  const [isRegeneratingLogo, setIsRegeneratingLogo] = useState(false);
+  
+  // Walkie-Talkie State
+  const [isPTTActive, setIsPTTActive] = useState(false);
+  const [isReceivingVoice, setIsReceivingVoice] = useState(false);
+  const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
+  const [micPermission, setMicPermission] = useState<'prompt' | 'granted' | 'denied'>('prompt');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
-    const loadLogo = async () => {
+    const loadSettings = async () => {
       try {
-        const logo = await generateLogo();
-        setAppLogo(logo);
+        const res = await fetch('/api/settings');
+        const data = await res.json();
+        setAppName(data.app_name || 'Kaptan APP');
+        if (data.app_logo) {
+          setAppLogo(data.app_logo);
+        } else {
+          // If no logo in DB, try to generate one (first time)
+          const logoRes = await fetch('/api/logo');
+          const logoData = await logoRes.json();
+          if (logoData.logo) {
+            setAppLogo(logoData.logo);
+          }
+        }
       } catch (e) {
-        console.error("Failed to generate logo", e);
+        console.error("Failed to load settings", e);
       }
     };
-    loadLogo();
+    loadSettings();
+    
+    // Check microphone permission
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'microphone' as PermissionName }).then(permissionStatus => {
+        setMicPermission(permissionStatus.state as any);
+        permissionStatus.onchange = () => {
+          setMicPermission(permissionStatus.state as any);
+        };
+      });
+    }
 
     // Check if already logged in
     fetch('/api/me')
@@ -111,6 +146,33 @@ export default function App() {
 
     newSocket.on('trip:new', (trip: Trip) => {
       setTrips(prev => [trip, ...prev]);
+    });
+
+    newSocket.on('db:reset', () => {
+      window.location.reload();
+    });
+
+    newSocket.on('voice:stream', async (data: { audio: ArrayBuffer, username: string }) => {
+      setIsReceivingVoice(true);
+      setActiveSpeaker(data.username);
+      
+      const blob = new Blob([data.audio], { type: 'audio/webm' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      
+      audio.onended = () => {
+        setIsReceivingVoice(false);
+        setActiveSpeaker(null);
+        URL.revokeObjectURL(url);
+      };
+      
+      try {
+        await audio.play();
+      } catch (err) {
+        console.error("Playback failed", err);
+        setIsReceivingVoice(false);
+        setActiveSpeaker(null);
+      }
     });
 
     return () => {
@@ -168,9 +230,98 @@ export default function App() {
     }
   };
 
+  const handleResetDatabase = async () => {
+    if (!confirm('WARNING: This will delete ALL trips and reset all accounts (except admin). Are you sure?')) return;
+    const res = await fetch('/api/admin/reset-db', { method: 'POST' });
+    if (res.ok) {
+      // The socket will trigger a reload
+    }
+  };
+
+  const handleRegenerateLogo = async () => {
+    setIsRegeneratingLogo(true);
+    try {
+      const res = await fetch('/api/admin/regenerate-logo', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setAppLogo(data.logo);
+      }
+    } catch (e) {
+      console.error("Failed to regenerate logo", e);
+    } finally {
+      setIsRegeneratingLogo(false);
+    }
+  };
+
+  const handleUpdateAppName = async (newName: string) => {
+    setAppName(newName);
+    await fetch('/api/admin/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_name: newName }),
+    });
+  };
+
   const handleLogout = async () => {
     await fetch('/api/logout', { method: 'POST' });
     setUser(null);
+  };
+
+  // Walkie-Talkie Handlers
+  const requestMicPermission = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach(track => track.stop());
+      setMicPermission('granted');
+    } catch (err) {
+      console.error("Mic permission denied", err);
+      setMicPermission('denied');
+    }
+  };
+
+  const startRecording = async () => {
+    if (!user) return;
+    
+    // If permission is not granted, try to request it first
+    if (micPermission !== 'granted') {
+      await requestMicPermission();
+      if (micPermission !== 'granted') return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mediaRecorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        socket?.emit('voice:stream', { audio: arrayBuffer, username: user.username });
+        
+        // Stop all tracks to release microphone
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      mediaRecorder.start();
+      setIsPTTActive(true);
+    } catch (err) {
+      console.error("Microphone access denied", err);
+      alert("Please allow microphone access to use the Walkie-Talkie.");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.stop();
+      setIsPTTActive(false);
+    }
   };
 
   const handleAddTrip = async (e: React.FormEvent) => {
@@ -261,7 +412,7 @@ export default function App() {
                 <Activity className="text-white w-8 h-8" />
               )}
             </div>
-            <h1 className="text-2xl font-bold">Kaptan APP</h1>
+            <h1 className="text-2xl font-bold">{appName}</h1>
             <p className="text-sm text-black/40">Sign in to manage your fleet</p>
           </div>
           <form onSubmit={handleLogin} className="space-y-4">
@@ -322,7 +473,7 @@ export default function App() {
             )}
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">Kaptan APP</h1>
+            <h1 className="text-xl font-bold tracking-tight">{appName}</h1>
             <p className="text-xs text-black/40 uppercase tracking-widest font-semibold">Real-Time Fleet System</p>
           </div>
         </div>
@@ -359,6 +510,63 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Walkie-Talkie Floating Bar */}
+      <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50">
+        <motion.div 
+          initial={{ y: 100 }}
+          animate={{ y: 0 }}
+          className={cn(
+            "bg-white rounded-full shadow-2xl border border-black/5 px-6 py-3 flex items-center gap-6 transition-all",
+            isPTTActive && "ring-4 ring-red-500/20 border-red-500/50",
+            isReceivingVoice && "ring-4 ring-emerald-500/20 border-emerald-500/50"
+          )}
+        >
+          <div className="flex items-center gap-3">
+            <div className={cn(
+              "w-10 h-10 rounded-full flex items-center justify-center transition-colors",
+              isReceivingVoice ? "bg-emerald-100 text-emerald-600 animate-pulse" : "bg-black/5 text-black/40"
+            )}>
+              {isReceivingVoice ? <Volume2 size={20} /> : <Radio size={20} />}
+            </div>
+            <div>
+              <p className="text-[10px] font-bold uppercase text-black/40 leading-none mb-1">Walkie-Talkie</p>
+              <p className="text-sm font-bold truncate max-w-[120px]">
+                {isReceivingVoice ? `${activeSpeaker} talking...` : isPTTActive ? 'You are talking...' : 'Ready'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            onMouseDown={startRecording}
+            onMouseUp={stopRecording}
+            onMouseLeave={stopRecording}
+            onTouchStart={startRecording}
+            onTouchEnd={stopRecording}
+            disabled={micPermission === 'denied'}
+            className={cn(
+              "w-16 h-16 rounded-full flex items-center justify-center transition-all active:scale-95 select-none",
+              isPTTActive ? "bg-red-500 text-white shadow-lg shadow-red-500/40" : "bg-black text-white hover:bg-black/80",
+              micPermission === 'denied' && "bg-gray-300 cursor-not-allowed"
+            )}
+          >
+            {micPermission === 'denied' ? <AlertCircle size={28} /> : isPTTActive ? <Mic size={28} /> : <MicOff size={28} />}
+          </button>
+          
+          <div className="hidden sm:block">
+            {micPermission === 'denied' ? (
+              <button 
+                onClick={requestMicPermission}
+                className="text-[10px] font-bold text-red-500 uppercase hover:underline"
+              >
+                Permission Denied - Fix
+              </button>
+            ) : (
+              <p className="text-[10px] font-bold text-black/20 uppercase">Hold to speak</p>
+            )}
+          </div>
+        </motion.div>
+      </div>
 
       <main className="p-6 max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Column: Car Status */}
@@ -406,13 +614,15 @@ export default function App() {
                     </div>
                   </div>
                   <div className="flex items-center justify-between mt-3">
-                    <div className="flex items-center gap-4 text-[11px] text-black/60 font-mono">
-                      <span className="flex items-center gap-1">
-                        <Navigation size={10} />
-                        {car.lat.toFixed(4)}, {car.lng.toFixed(4)}
-                      </span>
-                    </div>
-                    <div className="flex gap-2">
+                    {user.role === 'admin' && (
+                      <div className="flex items-center gap-4 text-[11px] text-black/60 font-mono">
+                        <span className="flex items-center gap-1">
+                          <Navigation size={10} />
+                          {car.lat.toFixed(4)}, {car.lng.toFixed(4)}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex gap-2 ml-auto">
                       <button 
                         onClick={() => setSelectedCarHistory(car)}
                         className="text-[10px] font-bold uppercase bg-black/5 hover:bg-black/10 px-2 py-1 rounded transition-colors flex items-center gap-1"
@@ -420,14 +630,16 @@ export default function App() {
                         <History size={10} />
                         History
                       </button>
-                      <button 
-                        onClick={() => handleViewOnMap(car.id)}
-                        className="text-[10px] font-bold uppercase bg-black/5 hover:bg-black/10 px-2 py-1 rounded transition-colors flex items-center gap-1"
-                      >
-                        <MapPin size={10} />
-                        View
-                      </button>
-                      {car.status === 'busy' && (
+                      {user.role === 'admin' && (
+                        <button 
+                          onClick={() => handleViewOnMap(car.id)}
+                          className="text-[10px] font-bold uppercase bg-black/5 hover:bg-black/10 px-2 py-1 rounded transition-colors flex items-center gap-1"
+                        >
+                          <MapPin size={10} />
+                          View
+                        </button>
+                      )}
+                      {car.status === 'busy' && (user.role === 'admin' || car.id === user.car_id) && (
                         <button 
                           onClick={() => setCarIdle(car.id)}
                           className="p-1 hover:bg-black/5 rounded text-black/40 hover:text-black transition-colors"
@@ -445,55 +657,80 @@ export default function App() {
         </div>
 
         {/* Right Column: Map & History */}
-        <div className="lg:col-span-8 space-y-6">
-          {/* Real Map Visualization */}
-          <section className="bg-white rounded-2xl border border-black/5 p-6 shadow-sm relative overflow-hidden h-[450px]">
-            <div className="relative z-10 h-full flex flex-col">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="font-bold flex items-center gap-2">
-                  <MapPin size={18} />
-                  GPS Tracking View
-                </h2>
-                <div className="flex gap-2">
-                  <div className="flex items-center gap-1 text-[10px] font-bold uppercase">
-                    <div className="w-2 h-2 rounded-full bg-emerald-500" /> Idle
-                  </div>
-                  <div className="flex items-center gap-1 text-[10px] font-bold uppercase">
-                    <div className="w-2 h-2 rounded-full bg-amber-500" /> In Transit
-                  </div>
+        <div className={cn("space-y-6", user.role === 'admin' ? "lg:col-span-8" : "lg:col-span-12")}>
+          {/* Driver Dashboard Summary - Non-Admin Only */}
+          {user.role !== 'admin' && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
+                <p className="text-[10px] font-bold uppercase text-black/40 mb-1">My Status</p>
+                <div className="flex items-center gap-2">
+                  <div className={cn("w-2 h-2 rounded-full", myCar?.status === 'idle' ? "bg-emerald-500" : "bg-amber-500")} />
+                  <p className="text-xl font-bold capitalize">{myCar?.status || 'Unknown'}</p>
                 </div>
               </div>
-              
-              <div className="flex-1 bg-black/[0.02] rounded-xl border border-black/5 relative overflow-hidden z-0">
-                <MapContainer 
-                  center={[cars[0]?.lat || 25.2048, cars[0]?.lng || 55.2708]} 
-                  zoom={13} 
-                  style={{ height: '100%', width: '100%' }}
-                >
-                  <TileLayer
-                    attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-                    url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                  />
-                  <MapFocus carId={focusedCarId} cars={cars} />
-                  {cars.map(car => (
-                    <Marker 
-                      key={car.id} 
-                      position={[car.lat, car.lng]}
-                      icon={carIcon(car.status, car.id === user.car_id)}
-                    >
-                      <Popup>
-                        <div className="p-1">
-                          <p className="font-bold text-sm">{car.name}</p>
-                          <p className="text-xs text-black/60 uppercase">{car.status}</p>
-                          {car.id === user.car_id && <p className="text-[10px] text-emerald-600 font-bold mt-1">THIS IS YOU</p>}
-                        </div>
-                      </Popup>
-                    </Marker>
-                  ))}
-                </MapContainer>
+              <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
+                <p className="text-[10px] font-bold uppercase text-black/40 mb-1">Total Trips</p>
+                <p className="text-xl font-bold">{trips.filter(t => t.car_id === user.car_id).length}</p>
+              </div>
+              <div className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm">
+                <p className="text-[10px] font-bold uppercase text-black/40 mb-1">My Earnings</p>
+                <p className="text-xl font-bold text-emerald-600">
+                  ${trips.filter(t => t.car_id === user.car_id).reduce((acc, t) => acc + t.price, 0).toFixed(2)}
+                </p>
               </div>
             </div>
-          </section>
+          )}
+
+          {/* Real Map Visualization - Admin Only */}
+          {user.role === 'admin' && (
+            <section className="bg-white rounded-2xl border border-black/5 p-6 shadow-sm relative overflow-hidden h-[450px]">
+              <div className="relative z-10 h-full flex flex-col">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-bold flex items-center gap-2">
+                    <MapPin size={18} />
+                    GPS Tracking View
+                  </h2>
+                  <div className="flex gap-2">
+                    <div className="flex items-center gap-1 text-[10px] font-bold uppercase">
+                      <div className="w-2 h-2 rounded-full bg-emerald-500" /> Idle
+                    </div>
+                    <div className="flex items-center gap-1 text-[10px] font-bold uppercase">
+                      <div className="w-2 h-2 rounded-full bg-amber-500" /> In Transit
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="flex-1 bg-black/[0.02] rounded-xl border border-black/5 relative overflow-hidden z-0">
+                  <MapContainer 
+                    center={[cars[0]?.lat || 25.2048, cars[0]?.lng || 55.2708]} 
+                    zoom={13} 
+                    style={{ height: '100%', width: '100%' }}
+                  >
+                    <TileLayer
+                      attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+                      url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                    />
+                    <MapFocus carId={focusedCarId} cars={cars} />
+                    {cars.map(car => (
+                      <Marker 
+                        key={car.id} 
+                        position={[car.lat, car.lng]}
+                        icon={carIcon(car.status, car.id === user.car_id)}
+                      >
+                        <Popup>
+                          <div className="p-1">
+                            <p className="font-bold text-sm">{car.name}</p>
+                            <p className="text-xs text-black/60 uppercase">{car.status}</p>
+                            {car.id === user.car_id && <p className="text-[10px] text-emerald-600 font-bold mt-1">THIS IS YOU</p>}
+                          </div>
+                        </Popup>
+                      </Marker>
+                    ))}
+                  </MapContainer>
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Trip History */}
           <section className="bg-white rounded-2xl border border-black/5 overflow-hidden shadow-sm">
@@ -801,6 +1038,50 @@ export default function App() {
                       Create User
                     </button>
                   </form>
+
+                  {/* Danger Zone */}
+                  <div className="pt-6 border-t border-black/5">
+                    <h4 className="font-bold flex items-center gap-2 text-sm text-black mb-3">
+                      <Settings size={16} />
+                      App Customization
+                    </h4>
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <label className="text-[10px] font-bold uppercase text-black/40">App Name</label>
+                        <input 
+                          type="text"
+                          value={appName}
+                          onChange={e => handleUpdateAppName(e.target.value)}
+                          className="w-full bg-black/5 border-none rounded-xl px-3 py-2 text-sm outline-none"
+                        />
+                      </div>
+                      <button 
+                        onClick={handleRegenerateLogo}
+                        disabled={isRegeneratingLogo}
+                        className="w-full bg-black text-white py-2 rounded-xl text-xs font-bold hover:bg-black/80 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {isRegeneratingLogo ? <Activity className="animate-spin" size={14} /> : <Activity size={14} />}
+                        Regenerate AI Logo
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-6 border-t border-black/5">
+                    <h4 className="font-bold flex items-center gap-2 text-sm text-red-600 mb-3">
+                      <AlertCircle size={16} />
+                      Danger Zone
+                    </h4>
+                    <button 
+                      onClick={handleResetDatabase}
+                      className="w-full bg-red-50 text-red-600 border border-red-100 py-3 rounded-xl text-xs font-bold hover:bg-red-100 transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Trash2 size={14} />
+                      Reset All Data & Fleet
+                    </button>
+                    <p className="text-[10px] text-black/40 mt-2 text-center">
+                      This will restore the app to its original state.
+                    </p>
+                  </div>
                 </div>
               </div>
             </motion.div>

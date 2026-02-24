@@ -26,7 +26,7 @@ async function generateLogo() {
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
       contents: {
-        parts: [{ text: 'A professional, minimalist vector logo for a transport app called "Kaptan APP". Fusing Pakistan crescent and Dubai Burj Khalifa. Deep green and gold.' }],
+        parts: [{ text: 'A professional, minimalist vector logo for a transport app called "Kaptan APP". The design should elegantly fuse the Pakistan crescent and star with the iconic Dubai Burj Khalifa silhouette. Use a sophisticated color palette of deep emerald green, gold, and white. Minimalist, modern, and high-end.' }],
       },
     });
 
@@ -70,7 +70,19 @@ db.exec(`
     price REAL,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
 `);
+
+// Seed initial settings
+const settingsCount = db.prepare("SELECT COUNT(*) as count FROM settings").get() as { count: number };
+if (settingsCount.count === 0) {
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run('app_name', 'Kaptan APP');
+  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run('app_logo', '');
+}
 
 // Seed initial cars and users if empty
 const carCount = db.prepare("SELECT COUNT(*) as count FROM cars").get() as { count: number };
@@ -124,9 +136,35 @@ async function startServer() {
   }));
 
   // API Routes
-  app.get("/api/logo", async (req, res) => {
+  app.get("/api/settings", (req, res) => {
+    const settings = db.prepare("SELECT * FROM settings").all() as { key: string, value: string }[];
+    const settingsObj = settings.reduce((acc, s) => ({ ...acc, [s.key]: s.value }), {});
+    res.json(settingsObj);
+  });
+
+  app.post("/api/admin/settings", (req, res) => {
+    if ((req.session as any).role !== 'admin') return res.status(403).json({ error: "Forbidden" });
+    const { app_name } = req.body;
+    if (app_name) {
+      db.prepare("UPDATE settings SET value = ? WHERE key = 'app_name'").run(app_name);
+    }
+    res.json({ success: true });
+  });
+
+  app.post("/api/admin/regenerate-logo", async (req, res) => {
+    if ((req.session as any).role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     const logo = await generateLogo();
-    res.json({ logo });
+    if (logo) {
+      db.prepare("UPDATE settings SET value = ? WHERE key = 'app_logo'").run(logo);
+      res.json({ logo });
+    } else {
+      res.status(500).json({ error: "Failed to generate logo" });
+    }
+  });
+
+  app.get("/api/logo", (req, res) => {
+    const logo = db.prepare("SELECT value FROM settings WHERE key = 'app_logo'").get() as { value: string };
+    res.json({ logo: logo?.value || null });
   });
 
   app.post("/api/login", (req, res) => {
@@ -178,6 +216,66 @@ async function startServer() {
     if ((req.session as any).role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     db.prepare("DELETE FROM users WHERE id = ?").run(req.params.id);
     res.json({ success: true });
+  });
+
+  app.post("/api/admin/reset-db", (req, res) => {
+    if ((req.session as any).role !== 'admin') return res.status(403).json({ error: "Forbidden" });
+    
+    db.transaction(() => {
+      db.prepare("DROP TABLE IF EXISTS trips").run();
+      db.prepare("DROP TABLE IF EXISTS users").run();
+      db.prepare("DROP TABLE IF EXISTS cars").run();
+      
+      // Re-create tables
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS cars (
+          id TEXT PRIMARY KEY,
+          name TEXT,
+          lat REAL,
+          lng REAL,
+          status TEXT,
+          target_lat REAL,
+          target_lng REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          username TEXT UNIQUE,
+          password TEXT,
+          car_id TEXT,
+          role TEXT DEFAULT 'driver',
+          FOREIGN KEY(car_id) REFERENCES cars(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS trips (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          car_id TEXT,
+          origin TEXT,
+          destination TEXT,
+          price REAL,
+          timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
+      // Re-seed
+      const initialNames = ['Umar', 'Usman', 'Buta'];
+      const insertCar = db.prepare("INSERT INTO cars (id, name, lat, lng, status) VALUES (?, ?, ?, ?, ?)");
+      for (let i = 0; i < initialNames.length; i++) {
+        const carId = `car-${i + 1}`;
+        insertCar.run(carId, initialNames[i], 25.2048 + (Math.random() - 0.5) * 0.05, 55.2708 + (Math.random() - 0.5) * 0.05, 'idle');
+      }
+
+      const insertUser = db.prepare("INSERT INTO users (username, password, car_id, role) VALUES (?, ?, ?, ?)");
+      insertUser.run('admin', 'admin123', null, 'admin');
+      for (let i = 0; i < initialNames.length; i++) {
+        const username = initialNames[i].toLowerCase().replace(' ', '');
+        insertUser.run(username, `pass${i + 1}`, `car-${i + 1}`, 'driver');
+      }
+    })();
+
+    res.json({ success: true });
+    // Force a reload on clients via socket or just let them refresh
+    io.emit("db:reset");
   });
 
   app.post("/api/logout", (req, res) => {
@@ -250,6 +348,12 @@ async function startServer() {
 
   io.on("connection", (socket) => {
     console.log("Client connected:", socket.id);
+    
+    socket.on("voice:stream", (data) => {
+      // Broadcast voice data to all other connected clients
+      socket.broadcast.emit("voice:stream", data);
+    });
+
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
     });
